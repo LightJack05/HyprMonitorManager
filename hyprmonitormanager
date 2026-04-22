@@ -1,0 +1,441 @@
+#!/usr/bin/env bash
+# hyprmonitormanager - Monitor configuration manager for Hyprland
+# Started via: exec-once = hyprmonitormanager daemon
+
+# ─── Settings ─────────────────────────────────────────────────────────────────
+
+load_settings() {
+    CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hyprmonitormanager/configs"
+    TARGET_PATH="$HOME/.config/hypr/display.conf"
+    WORKSPACES_PER_MONITOR=10
+    SKIP_MIRROR_PROMPT=false
+    AUTO_APPLY=true
+    POST_UPDATE_HOOK=""
+
+    local settings_file="${XDG_CONFIG_HOME:-$HOME/.config}/hyprmonitormanager/settings.conf"
+    # shellcheck source=/dev/null
+    [[ -f "$settings_file" ]] && source "$settings_file"
+}
+
+# ─── Monitor helpers ──────────────────────────────────────────────────────────
+
+# Cache hyprctl output within a single operation to avoid redundant calls
+MONITORS_JSON=""
+
+refresh_monitors() {
+    MONITORS_JSON=$(hyprctl monitors -j)
+}
+
+get_fingerprint() {
+    echo "$MONITORS_JSON" \
+        | jq -r '[.[] | .description] | sort | join("\n")' \
+        | sha256sum | cut -c1-16
+}
+
+get_descriptions() {
+    echo "$MONITORS_JSON" | jq -r '.[].description'
+}
+
+desc_to_port() {
+    local desc="$1"
+    echo "$MONITORS_JSON" | jq -r --arg d "$desc" '.[] | select(.description == $d) | .name'
+}
+
+# ─── Apply ────────────────────────────────────────────────────────────────────
+
+apply_config() {
+    local fingerprint config_dir
+    fingerprint=$(get_fingerprint)
+    config_dir="$CONFIG_DIR/$fingerprint"
+
+    [[ -d "$config_dir" ]] || return 1
+
+    local tmpfile
+    tmpfile=$(mktemp)
+
+    # Monitor lines (stored with desc: syntax — portable across port changes)
+    grep "^monitor=" "$config_dir/monitors.conf" >> "$tmpfile"
+    echo "" >> "$tmpfile"
+
+    # Workspace rules — regenerated at runtime using current port names
+    # priorities file: one description per line, ordered by priority (line 1 = priority 1)
+    local priority=0
+    while IFS= read -r desc; do
+        priority=$((priority + 1))
+        local port
+        port=$(desc_to_port "$desc")
+        [[ -z "$port" ]] && continue  # monitor not currently connected
+
+        local base=$(( (priority - 1) * WORKSPACES_PER_MONITOR + 1 ))
+        local end=$(( priority * WORKSPACES_PER_MONITOR ))
+        local first=true
+        for ((ws = base; ws <= end; ws++)); do
+            if [[ "$first" == true ]]; then
+                echo "workspace = $ws, monitor:$port, default:true" >> "$tmpfile"
+                first=false
+            else
+                echo "workspace = $ws, monitor:$port" >> "$tmpfile"
+            fi
+        done
+        echo "" >> "$tmpfile"
+    done < "$config_dir/priorities"
+
+    mv "$tmpfile" "$TARGET_PATH"
+
+    hyprctl reload >/dev/null
+
+    # Give Hyprland a moment to process the reload before moving workspaces
+    sleep 0.5
+
+    hyprctl -j workspacerules \
+        | jq -r '.[] | select(.monitor != "") | "\(.workspaceString) \(.monitor)"' \
+        | while read -r ws mon; do
+            hyprctl dispatch moveworkspacetomonitor "$ws $mon" >/dev/null
+        done
+
+    [[ -n "$POST_UPDATE_HOOK" ]] && eval "$POST_UPDATE_HOOK"
+
+    notify-send "HyprMonitorManager" "Monitor configuration applied." -t 3000
+}
+
+# ─── Wizard ───────────────────────────────────────────────────────────────────
+
+TMPDIR_WIZARD=""
+
+wizard() {
+    local prompted="${1:-false}"  # true = show "configure now?" dialog first
+
+    if [[ "$prompted" == true ]]; then
+        zenity --question \
+            --title="HyprMonitorManager" \
+            --text="New display configuration detected.\nConfigure displays now?" \
+            --width=350 2>/dev/null || return 0
+    fi
+
+    local count
+    count=$(echo "$MONITORS_JSON" | jq 'length')
+
+    local do_mirror=false
+    if [[ "$count" -eq 2 && "$SKIP_MIRROR_PROMPT" != "true" ]]; then
+        zenity --question \
+            --title="HyprMonitorManager" \
+            --text="Mirror displays?" \
+            --width=300 2>/dev/null && do_mirror=true
+    fi
+
+    local fingerprint config_dir
+    fingerprint=$(get_fingerprint)
+    config_dir="$CONFIG_DIR/$fingerprint"
+    mkdir -p "$config_dir"
+
+    if [[ "$do_mirror" == true ]]; then
+        wizard_mirror "$config_dir" || return 1
+    else
+        wizard_arrange "$config_dir" || return 1
+    fi
+
+    apply_config
+}
+
+wizard_mirror() {
+    local config_dir="$1"
+
+    # Identify internal (eDP) vs external monitor
+    local internal_desc="" external_desc=""
+    while IFS= read -r desc; do
+        local port
+        port=$(desc_to_port "$desc")
+        if [[ "$port" == eDP* ]]; then
+            internal_desc="$desc"
+        else
+            external_desc="$desc"
+        fi
+    done < <(get_descriptions)
+
+    # No eDP found — ask the user which to use as the base
+    if [[ -z "$internal_desc" ]]; then
+        local descriptions=()
+        mapfile -t descriptions < <(get_descriptions)
+
+        internal_desc=$(zenity --list \
+            --title="HyprMonitorManager" \
+            --text="Select the base display (to mirror from):" \
+            --column="Monitor" "${descriptions[@]}" \
+            --width=450 --height=250 2>/dev/null) || return 1
+
+        for desc in "${descriptions[@]}"; do
+            [[ "$desc" != "$internal_desc" ]] && external_desc="$desc"
+        done
+    fi
+
+    local internal_port external_port internal_scale
+    internal_port=$(desc_to_port "$internal_desc")
+    external_port=$(desc_to_port "$external_desc")
+    internal_scale=$(echo "$MONITORS_JSON" \
+        | jq -r --arg n "$internal_port" '.[] | select(.name==$n) | .scale')
+
+    {
+        echo "monitor=desc:$internal_desc,preferred,0x0,$internal_scale"
+        echo "monitor=desc:$external_desc,preferred,auto,1,mirror,$internal_port"
+    } > "$config_dir/monitors.conf"
+
+    # Priority: internal is always priority 1 when mirroring
+    echo "$internal_desc" > "$config_dir/priorities"
+}
+
+wizard_arrange() {
+    local config_dir="$1"
+
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    TMPDIR_WIZARD="$tmpdir"
+
+    nwg-displays -m "$tmpdir/monitors.conf" -w "$tmpdir/workspaces.conf" 2>/dev/null
+
+    if [[ ! -s "$tmpdir/monitors.conf" ]]; then
+        notify-send "HyprMonitorManager" "Configuration cancelled." -t 3000
+        rm -rf "$tmpdir"
+        TMPDIR_WIZARD=""
+        return 1
+    fi
+
+    # Convert port names in nwg-displays output to desc: syntax
+    {
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^monitor= ]]; then
+                local port desc
+                port=$(echo "$line" | sed 's/^monitor=\([^,]*\),.*/\1/')
+                desc=$(echo "$MONITORS_JSON" \
+                    | jq -r --arg n "$port" '.[] | select(.name==$n) | .description')
+                if [[ -n "$desc" ]]; then
+                    # Replace the port token with desc:DESCRIPTION
+                    echo "monitor=desc:${desc},${line#monitor=$port,}"
+                else
+                    echo "$line"
+                fi
+            fi
+        done < "$tmpdir/monitors.conf"
+    } > "$config_dir/monitors.conf"
+
+    rm -rf "$tmpdir"
+    TMPDIR_WIZARD=""
+
+    wizard_priorities "$config_dir"
+}
+
+wizard_priorities() {
+    local config_dir="$1"
+
+    local descriptions=()
+    mapfile -t descriptions < <(get_descriptions)
+    local count=${#descriptions[@]}
+
+    # Build human-readable labels: "MAKE MODEL (WxH@HZ)"
+    declare -A desc_to_label
+    for desc in "${descriptions[@]}"; do
+        local port make model width height hz
+        port=$(desc_to_port "$desc")
+        make=$(echo "$MONITORS_JSON" | jq -r --arg n "$port" '.[] | select(.name==$n) | .make')
+        model=$(echo "$MONITORS_JSON" | jq -r --arg n "$port" '.[] | select(.name==$n) | .model')
+        width=$(echo "$MONITORS_JSON" | jq -r --arg n "$port" '.[] | select(.name==$n) | .width')
+        height=$(echo "$MONITORS_JSON" | jq -r --arg n "$port" '.[] | select(.name==$n) | .height')
+        hz=$(echo "$MONITORS_JSON" | jq -r --arg n "$port" '.[] | select(.name==$n) | .refreshRate | floor')
+        desc_to_label["$desc"]="$make $model  ${width}x${height}@${hz}Hz"
+    done
+
+    local remaining=("${descriptions[@]}")
+    > "$config_dir/priorities"
+
+    for ((p = 1; p <= count; p++)); do
+        local labels=()
+        for desc in "${remaining[@]}"; do
+            labels+=("${desc_to_label[$desc]}")
+        done
+
+        local prompt
+        if [[ $p -eq 1 ]]; then
+            prompt="Select the primary display (priority 1 — workspaces 1–${WORKSPACES_PER_MONITOR}):"
+        else
+            local base=$(( (p - 1) * WORKSPACES_PER_MONITOR + 1 ))
+            local end=$(( p * WORKSPACES_PER_MONITOR ))
+            prompt="Select display for priority $p (workspaces ${base}–${end}):"
+        fi
+
+        local chosen_label
+        chosen_label=$(zenity --list \
+            --title="HyprMonitorManager" \
+            --text="$prompt" \
+            --column="Monitor" "${labels[@]}" \
+            --width=500 --height=300 2>/dev/null) || return 1
+
+        # Map label back to description
+        local chosen_desc=""
+        for desc in "${remaining[@]}"; do
+            if [[ "${desc_to_label[$desc]}" == "$chosen_label" ]]; then
+                chosen_desc="$desc"
+                break
+            fi
+        done
+
+        echo "$chosen_desc" >> "$config_dir/priorities"
+
+        local new_remaining=()
+        for desc in "${remaining[@]}"; do
+            [[ "$desc" != "$chosen_desc" ]] && new_remaining+=("$desc")
+        done
+        remaining=("${new_remaining[@]}")
+    done
+}
+
+# ─── Daemon ───────────────────────────────────────────────────────────────────
+
+cleanup() {
+    [[ -n "$TMPDIR_WIZARD" && -d "$TMPDIR_WIZARD" ]] && rm -rf "$TMPDIR_WIZARD"
+    exit 0
+}
+
+trap cleanup SIGTERM SIGINT EXIT
+
+handle_monitor_change() {
+    load_settings
+    refresh_monitors
+
+    if apply_config; then
+        return
+    fi
+
+    if [[ "$AUTO_APPLY" == "true" ]]; then
+        wizard true
+    else
+        notify-send "HyprMonitorManager" \
+            "New display configuration detected.\nRun: hyprmonitormanager configure" \
+            -t 8000
+    fi
+}
+
+cmd_daemon() {
+    load_settings
+
+    local socket2="$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock"
+
+    if [[ ! -S "$socket2" ]]; then
+        echo "Error: Hyprland socket2 not found at: $socket2" >&2
+        echo "Is HYPRLAND_INSTANCE_SIGNATURE set and Hyprland running?" >&2
+        exit 1
+    fi
+
+    # Handle monitors already connected at Hyprland startup
+    handle_monitor_change
+
+    # Listen for monitor hotplug events
+    while IFS= read -r event; do
+        case "$event" in
+            monitoraddedv2\>*|monitorremoved\>*)
+                # Debounce: wait for burst of events (e.g., docking station)
+                sleep 2
+                while IFS= read -t 0.1 -r _; do :; done
+                handle_monitor_change
+                ;;
+        esac
+    done < <(ncat -U "$socket2")
+    # ncat exits when Hyprland closes the socket — daemon exits naturally
+}
+
+# ─── Other subcommands ────────────────────────────────────────────────────────
+
+cmd_apply() {
+    load_settings
+    refresh_monitors
+    if ! apply_config; then
+        echo "No stored configuration for the current monitor set." >&2
+        echo "Run: hyprmonitormanager configure" >&2
+        exit 1
+    fi
+}
+
+cmd_configure() {
+    load_settings
+    refresh_monitors
+    wizard false
+}
+
+cmd_list() {
+    load_settings
+
+    if [[ ! -d "$CONFIG_DIR" ]]; then
+        echo "No configurations stored yet."
+        return
+    fi
+
+    local found=false
+    for dir in "$CONFIG_DIR"/*/; do
+        [[ -d "$dir" ]] || continue
+        found=true
+        local id
+        id=$(basename "$dir")
+        echo "[$id]"
+        if [[ -f "$dir/priorities" ]]; then
+            local p=0
+            while IFS= read -r desc; do
+                p=$((p + 1))
+                echo "  Priority $p: $desc"
+            done < "$dir/priorities"
+        fi
+        echo ""
+    done
+
+    [[ "$found" == false ]] && echo "No configurations stored yet."
+}
+
+cmd_delete() {
+    load_settings
+    local id="${1:-}"
+    if [[ -z "$id" ]]; then
+        echo "Usage: hyprmonitormanager delete <id>" >&2
+        exit 1
+    fi
+    local config_dir="$CONFIG_DIR/$id"
+    if [[ ! -d "$config_dir" ]]; then
+        echo "No configuration found with id: $id" >&2
+        exit 1
+    fi
+    rm -rf "$config_dir"
+    echo "Deleted configuration: $id"
+}
+
+usage() {
+    cat <<'EOF'
+hyprmonitormanager — Monitor configuration manager for Hyprland
+
+Usage: hyprmonitormanager <command>
+
+Commands:
+  daemon       Start the monitor hotplug listener (add to hyprland.conf exec-once)
+  apply        Apply stored config for the current monitor set
+  configure    Launch the interactive configuration wizard
+  list         List all stored configurations
+  delete <id>  Delete a stored configuration by id
+
+Setup:
+  Add to ~/.config/hypr/hyprland.conf:
+    exec-once = hyprmonitormanager daemon
+
+  Ensure display.conf is sourced:
+    source = ~/.config/hypr/display.conf
+
+  Optional settings file: ~/.config/hyprmonitormanager/settings.conf
+EOF
+}
+
+# ─── Entry point ──────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+    daemon)    cmd_daemon ;;
+    apply)     cmd_apply ;;
+    configure) cmd_configure ;;
+    list)      cmd_list ;;
+    delete)    cmd_delete "${2:-}" ;;
+    -h|--help|help) usage ;;
+    "") usage ;;
+    *) echo "Unknown command: $1" >&2; usage >&2; exit 1 ;;
+esac

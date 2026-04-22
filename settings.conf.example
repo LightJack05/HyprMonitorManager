@@ -1,0 +1,27 @@
+# HyprMonitorManager settings
+# Copy to ~/.config/hyprmonitormanager/settings.conf and edit as needed.
+# All values shown are the defaults.
+
+# Directory where monitor configurations are stored
+#CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hyprmonitormanager/configs"
+
+# Path hyprmonitormanager writes its generated config to.
+# This file must be sourced in hyprland.conf:
+#   source = ~/.config/hypr/display.conf
+#TARGET_PATH="$HOME/.config/hypr/display.conf"
+
+# Number of workspaces assigned per monitor.
+# Priority 1 gets 1–N, priority 2 gets (N+1)–2N, etc.
+#WORKSPACES_PER_MONITOR=10
+
+# Set to true to skip the "Mirror displays?" prompt.
+# Useful if you never want mirroring.
+#SKIP_MIRROR_PROMPT=false
+
+# Set to false to suppress the automatic configuration wizard on new monitor
+# detection. A notification will appear instead with instructions.
+#AUTO_APPLY=true
+
+# Shell command to run after a configuration is applied.
+# Example: restart waybar so it appears on the correct monitor.
+#POST_UPDATE_HOOK="pkill -SIGUSR2 waybar"
