@@ -374,6 +374,19 @@ cmd_list() {
         local id
         id=$(basename "$dir")
         echo "[$id]"
+        # Show monitors present in monitors.conf but not in priorities (e.g. mirrored)
+        if [[ -f "$dir/monitors.conf" ]]; then
+            while IFS= read -r line; do
+                [[ "$line" =~ ^monitor=desc:(.+),[^,]+,.* ]] || continue
+                local desc="${BASH_REMATCH[1]}"
+                local already=false
+                for pd in "${priority_descs[@]}"; do
+                    [[ "$pd" == "$desc" ]] && already=true && break
+                done
+                [[ "$already" == false ]] && echo "  Configured:  $desc"
+            done < "$dir/monitors.conf"
+        fi
+        echo ""
         # Collect priority-assigned monitors
         local priority_descs=()
         if [[ -f "$dir/priorities" ]]; then
@@ -384,19 +397,6 @@ cmd_list() {
                 priority_descs+=("$desc")
             done < "$dir/priorities"
         fi
-        # Show monitors present in monitors.conf but not in priorities (e.g. mirrored)
-        if [[ -f "$dir/monitors.conf" ]]; then
-            while IFS= read -r line; do
-                [[ "$line" =~ ^monitor=desc:(.+),[^,]+,.* ]] || continue
-                local desc="${BASH_REMATCH[1]}"
-                local already=false
-                for pd in "${priority_descs[@]}"; do
-                    [[ "$pd" == "$desc" ]] && already=true && break
-                done
-                [[ "$already" == false ]] && echo "  Mirrored:  $desc"
-            done < "$dir/monitors.conf"
-        fi
-        echo ""
     done
 
     [[ "$found" == false ]] && echo "No configurations stored yet."
