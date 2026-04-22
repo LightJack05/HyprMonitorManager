@@ -31,7 +31,7 @@ On Arch: `pacman -S jq nmap zenity nwg-displays libnotify`
 
 ```bash
 git clone https://github.com/LightJack05/HyprMonitorManager
-cd HyprMonitorManager
+cd HyprMonitorManager/packaging
 makepkg -si
 ```
 
@@ -101,7 +101,7 @@ After completing the wizard, the config is saved and applied. Future connections
 hyprmonitormanager daemon       Start the hotplug listener (use exec-once)
 hyprmonitormanager apply        Apply the saved config for current monitors
 hyprmonitormanager configure    Run the wizard for the current monitor set
-hyprmonitormanager list         Show all saved configurations
+hyprmonitormanager list         Show all saved configurations and their monitors
 hyprmonitormanager delete <id>  Delete a saved configuration
 ```
 
@@ -122,7 +122,7 @@ Settings file location: `~/.config/hyprmonitormanager/settings.conf`
 
 ## How configurations are stored
 
-Each unique monitor set gets its own directory under `CONFIG_DIR`, named by a 16-character fingerprint derived from the hardware descriptions of the connected displays. This fingerprint is stable: it's based on the monitor's make, model, and serial number — not the port it's plugged into. Plugging the same monitor into a different DP port still matches the saved config.
+Each unique monitor set gets its own directory under `CONFIG_DIR`, named by a 16-character fingerprint derived from the hardware descriptions of all connected displays (including disabled ones). This fingerprint is stable: it's based on the monitor's make, model, and serial number — not the port it's plugged into. Plugging the same monitor into a different DP port still matches the saved config.
 
 ```
 ~/.config/hyprmonitormanager/configs/
