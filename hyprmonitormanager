@@ -23,7 +23,7 @@ load_settings() {
 MONITORS_JSON=""
 
 refresh_monitors() {
-    MONITORS_JSON=$(hyprctl monitors -j)
+    MONITORS_JSON=$(hyprctl monitors all -j)
 }
 
 get_fingerprint() {
@@ -374,12 +374,27 @@ cmd_list() {
         local id
         id=$(basename "$dir")
         echo "[$id]"
+        # Collect priority-assigned monitors
+        local priority_descs=()
         if [[ -f "$dir/priorities" ]]; then
             local p=0
             while IFS= read -r desc; do
                 p=$((p + 1))
                 echo "  Priority $p: $desc"
+                priority_descs+=("$desc")
             done < "$dir/priorities"
+        fi
+        # Show monitors present in monitors.conf but not in priorities (e.g. mirrored)
+        if [[ -f "$dir/monitors.conf" ]]; then
+            while IFS= read -r line; do
+                [[ "$line" =~ ^monitor=desc:(.+),[^,]+,.* ]] || continue
+                local desc="${BASH_REMATCH[1]}"
+                local already=false
+                for pd in "${priority_descs[@]}"; do
+                    [[ "$pd" == "$desc" ]] && already=true && break
+                done
+                [[ "$already" == false ]] && echo "  Mirrored:  $desc"
+            done < "$dir/monitors.conf"
         fi
         echo ""
     done
