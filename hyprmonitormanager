@@ -397,6 +397,8 @@ cmd_list() {
                 priority_descs+=("$desc")
             done < "$dir/priorities"
         fi
+        echo ""
+        echo ""
     done
 
     [[ "$found" == false ]] && echo "No configurations stored yet."
