@@ -6,7 +6,7 @@
 
 load_settings() {
     CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hyprmonitormanager/configs"
-    TARGET_PATH="$HOME/.config/hypr/display.conf"
+    TARGET_PATH="$HOME/.config/hypr/display.lua"
     WORKSPACES_PER_MONITOR=10
     SKIP_MIRROR_PROMPT=false
     AUTO_APPLY=true
@@ -48,13 +48,13 @@ apply_config() {
     fingerprint=$(get_fingerprint)
     config_dir="$CONFIG_DIR/$fingerprint"
 
-    [[ -d "$config_dir" ]] || return 1
+    [[ -f "$config_dir/monitors.lua" ]] || return 1
 
     local tmpfile
     tmpfile=$(mktemp)
 
-    # Monitor lines (stored with desc: syntax — portable across port changes)
-    grep "^monitor=" "$config_dir/monitors.conf" >> "$tmpfile"
+    # Monitor blocks (stored with desc: syntax — portable across port changes)
+    cat "$config_dir/monitors.lua" >> "$tmpfile"
     echo "" >> "$tmpfile"
 
     # Workspace rules — regenerated at runtime using current port names
@@ -71,10 +71,10 @@ apply_config() {
         local first=true
         for ((ws = base; ws <= end; ws++)); do
             if [[ "$first" == true ]]; then
-                echo "workspace = $ws, monitor:$port, default:true" >> "$tmpfile"
+                echo "hl.workspace_rule({ workspace = \"$ws\", monitor = \"$port\", default = true })" >> "$tmpfile"
                 first=false
             else
-                echo "workspace = $ws, monitor:$port" >> "$tmpfile"
+                echo "hl.workspace_rule({ workspace = \"$ws\", monitor = \"$port\" })" >> "$tmpfile"
             fi
         done
         echo "" >> "$tmpfile"
@@ -175,9 +175,9 @@ wizard_mirror() {
         | jq -r --arg n "$internal_port" '.[] | select(.name==$n) | .scale')
 
     {
-        echo "monitor=desc:$internal_desc,preferred,0x0,$internal_scale"
-        echo "monitor=desc:$external_desc,preferred,auto,1,mirror,$internal_port"
-    } > "$config_dir/monitors.conf"
+        echo "hl.monitor({ output = \"desc:$internal_desc\", mode = \"preferred\", position = \"0x0\", scale = $internal_scale })"
+        echo "hl.monitor({ output = \"desc:$external_desc\", mode = \"preferred\", position = \"auto\", scale = 1, mirror = \"$internal_port\" })"
+    } > "$config_dir/monitors.lua"
 
     # Priority: internal is always priority 1 when mirroring
     echo "$internal_desc" > "$config_dir/priorities"
@@ -192,30 +192,30 @@ wizard_arrange() {
 
     nwg-displays -m "$tmpdir/monitors.conf" -w "$tmpdir/workspaces.conf" 2>/dev/null
 
-    if [[ ! -s "$tmpdir/monitors.conf" ]]; then
+    if [[ ! -s "$tmpdir/monitors.lua" ]]; then
         notify-send "HyprMonitorManager" "Configuration cancelled." -t 3000
         rm -rf "$tmpdir"
         TMPDIR_WIZARD=""
         return 1
     fi
 
-    # Convert port names in nwg-displays output to desc: syntax
+    # Convert port names in nwg-displays Lua output to desc: syntax
     {
         while IFS= read -r line; do
-            if [[ "$line" =~ ^monitor= ]]; then
-                local port desc
-                port=$(echo "$line" | sed 's/^monitor=\([^,]*\),.*/\1/')
-                desc=$(echo "$MONITORS_JSON" \
-                    | jq -r --arg n "$port" '.[] | select(.name==$n) | .description')
-                if [[ -n "$desc" ]]; then
-                    # Replace the port token with desc:DESCRIPTION
-                    echo "monitor=desc:${desc},${line#monitor=$port,}"
-                else
-                    echo "$line"
+            if [[ "$line" =~ ^[[:space:]]*output\ =\ \"([^\"]+)\" ]]; then
+                local port="${BASH_REMATCH[1]}"
+                if [[ "$port" != desc:* ]]; then
+                    local desc
+                    desc=$(echo "$MONITORS_JSON" \
+                        | jq -r --arg n "$port" '.[] | select(.name==$n) | .description')
+                    if [[ -n "$desc" ]]; then
+                        line="${line/$port/desc:$desc}"
+                    fi
                 fi
             fi
-        done < "$tmpdir/monitors.conf"
-    } > "$config_dir/monitors.conf"
+            echo "$line"
+        done < "$tmpdir/monitors.lua"
+    } > "$config_dir/monitors.lua"
 
     rm -rf "$tmpdir"
     TMPDIR_WIZARD=""
@@ -374,17 +374,17 @@ cmd_list() {
         local id
         id=$(basename "$dir")
         echo "[$id]"
-        # Show monitors present in monitors.conf but not in priorities (e.g. mirrored)
-        if [[ -f "$dir/monitors.conf" ]]; then
+        # Show monitors present in monitors.lua but not in priorities (e.g. mirrored)
+        if [[ -f "$dir/monitors.lua" ]]; then
             while IFS= read -r line; do
-                [[ "$line" =~ ^monitor=desc:(.+),[^,]+,.* ]] || continue
+                [[ "$line" =~ ^[[:space:]]*output\ =\ \"desc:([^\"]+)\" ]] || continue
                 local desc="${BASH_REMATCH[1]}"
                 local already=false
                 for pd in "${priority_descs[@]}"; do
                     [[ "$pd" == "$desc" ]] && already=true && break
                 done
                 [[ "$already" == false ]] && echo "  Configured:  $desc"
-            done < "$dir/monitors.conf"
+            done < "$dir/monitors.lua"
         fi
         echo ""
         # Collect priority-assigned monitors
@@ -427,18 +427,18 @@ hyprmonitormanager — Monitor configuration manager for Hyprland
 Usage: hyprmonitormanager <command>
 
 Commands:
-  daemon       Start the monitor hotplug listener (add to hyprland.conf exec-once)
+  daemon       Start the monitor hotplug listener (add to hyprland.lua exec-once)
   apply        Apply stored config for the current monitor set
   configure    Launch the interactive configuration wizard
   list         List all stored configurations
   delete <id>  Delete a stored configuration by id
 
 Setup:
-  Add to ~/.config/hypr/hyprland.conf:
-    exec-once = hyprmonitormanager daemon
+  Add to ~/.config/hypr/hyprland.lua:
+    hl.keyword("exec-once", "hyprmonitormanager daemon")
 
-  Ensure display.conf is sourced:
-    source = ~/.config/hypr/display.conf
+  Load display config (in hyprland.lua):
+    require("display")
 
   Optional settings file: ~/.config/hyprmonitormanager/settings.conf
 EOF

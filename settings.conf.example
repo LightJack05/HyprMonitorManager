@@ -6,9 +6,9 @@
 #CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hyprmonitormanager/configs"
 
 # Path hyprmonitormanager writes its generated config to.
-# This file must be sourced in hyprland.conf:
-#   source = ~/.config/hypr/display.conf
-#TARGET_PATH="$HOME/.config/hypr/display.conf"
+# This file must be required in hyprland.lua:
+#   require("display")
+#TARGET_PATH="$HOME/.config/hypr/display.lua"
 
 # Number of workspaces assigned per monitor.
 # Priority 1 gets 1–N, priority 2 gets (N+1)–2N, etc.

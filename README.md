@@ -43,26 +43,26 @@ sudo install -Dm755 hyprmonitormanager /usr/local/bin/hyprmonitormanager
 
 ## Setup
 
-### 1. Ensure `display.conf` is sourced in your Hyprland config
+### 1. Ensure `display.lua` is required in your Hyprland config
 
-Add this to `~/.config/hypr/hyprland.conf` if it isn't already there:
+Add this to `~/.config/hypr/hyprland.lua` if it isn't already there:
 
-```
-source = ~/.config/hypr/display.conf
+```lua
+require("display")
 ```
 
 Create an empty file so Hyprland doesn't error on first launch before any config is saved:
 
 ```bash
-touch ~/.config/hypr/display.conf
+touch ~/.config/hypr/display.lua
 ```
 
 ### 2. Start the daemon via exec-once
 
-Add to `~/.config/hypr/hyprland.conf`:
+Add to `~/.config/hypr/hyprland.lua`:
 
-```
-exec-once = hyprmonitormanager daemon
+```lua
+hl.keyword("exec-once", "hyprmonitormanager daemon")
 ```
 
 The daemon starts with Hyprland, handles monitors already connected at login, then listens for hotplug events. It exits naturally when Hyprland exits — no separate process management needed.
@@ -114,7 +114,7 @@ Settings file location: `~/.config/hyprmonitormanager/settings.conf`
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `CONFIG_DIR` | `~/.config/hyprmonitormanager/configs` | Where configurations are stored |
-| `TARGET_PATH` | `~/.config/hypr/display.conf` | Output file (must be sourced in hyprland.conf) |
+| `TARGET_PATH` | `~/.config/hypr/display.lua` | Output file (must be required in hyprland.lua) |
 | `WORKSPACES_PER_MONITOR` | `10` | Workspaces allocated per display |
 | `SKIP_MIRROR_PROMPT` | `false` | Skip the "mirror displays?" dialog |
 | `AUTO_APPLY` | `true` | Launch wizard on unknown monitor set. Set to `false` to get a notification instead |
@@ -127,11 +127,11 @@ Each unique monitor set gets its own directory under `CONFIG_DIR`, named by a 16
 ```
 ~/.config/hyprmonitormanager/configs/
 └── a3f1c8e09b2d4517/
-    ├── monitors.conf   # monitor=desc:... lines
+    ├── monitors.lua    # hl.monitor({...}) blocks
     └── priorities      # display descriptions, ordered by priority
 ```
 
-`monitors.conf` uses Hyprland's `desc:` monitor syntax, which targets displays by description rather than port name. Workspace rules are regenerated fresh on each apply, so they always reference the correct current port names.
+`monitors.lua` uses Hyprland's `desc:` monitor syntax via `hl.monitor({ output = "desc:...", ... })` blocks, which targets displays by description rather than port name. Workspace rules are regenerated fresh on each apply using `hl.workspace_rule({...})`, so they always reference the correct current port names.
 
 ## Reconfiguring a setup
 

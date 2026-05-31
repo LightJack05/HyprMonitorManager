@@ -36,12 +36,12 @@ hyprmonitormanager delete ID   # Delete a stored configuration
 ├── settings.conf                    # User settings
 └── configs/
     ├── <fingerprint>/
-    │   ├── monitors.conf            # monitor=desc:... lines (portable)
+    │   ├── monitors.lua             # hl.monitor({...}) blocks (portable)
     │   └── priorities               # description=priority_number (one per line)
     └── ...
 ```
 
-The generated output is written to the symlink target (`~/.config/hypr/display.conf` by default), which must already be `source`'d from `hyprland.conf`.
+The generated output is written to the symlink target (`~/.config/hypr/display.lua` by default), which must already be loaded via `require("display")` in `hyprland.lua`.
 
 ## Agent Definitions
 
@@ -94,15 +94,15 @@ fingerprint() {
 **Responsibility:** Generate a complete hyprland config from stored data, write it to the target path, reload, and move workspaces.
 
 **Key design choice — runtime workspace generation:**
-- `monitor=desc:...` lines are stored as-is (portable across port changes)
-- `workspace=N, monitor:PORT` lines are generated at apply time by resolving descriptions to current port names via `hyprctl monitors -j`
+- `hl.monitor({...})` blocks are stored as-is using `desc:` syntax (portable across port changes)
+- `hl.workspace_rule({...})` blocks are generated at apply time by resolving descriptions to current port names via `hyprctl monitors -j`
 - This means configs survive port reassignment (e.g., switching from DP-2 to DP-3)
 
 **Steps:**
-1. Read stored `monitors.conf` (the `monitor=desc:...` lines)
+1. Read stored `monitors.lua` (the `hl.monitor({...})` blocks)
 2. Read stored `priorities` file
 3. For each priority entry, look up the current port name: `hyprctl monitors -j | jq -r --arg d "$desc" '.[] | select(.description==$d) | .name'`
-4. Generate `workspace=` rules: priority 1 gets workspaces 1-N, priority 2 gets (N+1)-2N, etc. (N = configurable, default 10). First workspace on each monitor gets `default:true`
+4. Generate `hl.workspace_rule({...})` blocks: priority 1 gets workspaces 1-N, priority 2 gets (N+1)-2N, etc. (N = configurable, default 10). First workspace on each monitor gets `default = true`
 5. Write combined output to target path
 6. Run `hyprctl reload`
 7. Move workspaces to their correct monitors:
@@ -134,7 +134,7 @@ fingerprint() {
 
 **Mirror path:**
 1. Identify internal vs external display (internal = the one already present before the event, or the laptop panel if detectable)
-2. Generate config: `monitor=desc:EXTERNAL,preferred,auto,SCALE,mirror,INTERNAL_PORT`
+2. Generate config: `hl.monitor({ output = "desc:EXTERNAL", mode = "preferred", position = "auto", scale = SCALE, mirror = "INTERNAL_PORT" })`
 3. Scale optimization: for the mirrored display, calculate scale as `external_width / internal_effective_width`. If the external is lower-res, use `1`; if higher-res, scale up proportionally
 4. Store config and apply
 
@@ -146,20 +146,20 @@ fingerprint() {
    ```
 2. Wait for nwg-displays to exit
 3. If temp files weren't written (user closed without saving): abort
-4. Parse `$tmpdir/monitors.conf` — extract monitor settings, convert port names to `desc:` syntax:
+4. Parse `$tmpdir/monitors.lua` (nwg-displays writes a `.lua` file alongside the `.conf`) — extract monitor settings, convert port names to `desc:` syntax:
    ```bash
-   # For each monitor= line, replace the port name with desc:DESCRIPTION
+   # For each hl.monitor({...}) block, replace output = "PORT" with output = "desc:DESCRIPTION"
    while IFS= read -r line; do
-       port=$(echo "$line" | sed 's/^monitor=\([^,]*\),.*/\1/')
+       port=$(echo "$line" | grep -oP '(?<=output = ")[^"]+')
        desc=$(hyprctl monitors -j | jq -r --arg n "$port" '.[] | select(.name==$n) | .description')
-       echo "$line" | sed "s/^monitor=$port/monitor=desc:$desc/"
-   done < "$tmpdir/monitors.conf"
+       echo "$line" | sed "s/output = \"$port\"/output = \"desc:$desc\"/"
+   done < "$tmpdir/monitors.lua"
    ```
 5. **Priority assignment** — show a zenity dialog per priority level:
    - For 2 monitors: single dialog "Select the primary display" (other gets priority 2)
    - For 3+: sequential dialogs, each showing remaining unassigned monitors
    - Display labels: `MAKE MODEL (RESxRES)` for clarity
-6. Save `monitors.conf` and `priorities` to config dir
+6. Save `monitors.lua` and `priorities` to config dir
 7. Apply
 
 ### 5. Settings Agent (configuration)
@@ -172,8 +172,8 @@ fingerprint() {
 # Directory for stored monitor configurations
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hyprmonitormanager/configs"
 
-# Target path for the generated hyprland config (must be sourced in hyprland.conf)
-TARGET_PATH="$HOME/.config/hypr/display.conf"
+# Target path for the generated hyprland config (must be loaded via require("display") in hyprland.lua)
+TARGET_PATH="$HOME/.config/hypr/display.lua"
 
 # Workspaces allocated per monitor
 WORKSPACES_PER_MONITOR=10
@@ -193,7 +193,7 @@ POST_UPDATE_HOOK=""
 load_settings() {
     # Defaults (defined inline)
     CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hyprmonitormanager/configs"
-    TARGET_PATH="$HOME/.config/hypr/display.conf"
+    TARGET_PATH="$HOME/.config/hypr/display.lua"
     WORKSPACES_PER_MONITOR=10
     SKIP_MIRROR_PROMPT=false
     AUTO_APPLY=true
@@ -270,26 +270,26 @@ config  ┌────────────────────┐
 
 2. **Startup with multiple monitors:** Daemon runs `apply` immediately on start, before entering the event loop.
 
-3. **Monitor on different port:** Using `desc:` syntax for monitor lines and runtime port-name resolution for workspace rules handles this transparently.
+3. **Monitor on different port:** Using `desc:` syntax in `hl.monitor({...})` blocks and runtime port-name resolution for `hl.workspace_rule({...})` blocks handles this transparently.
 
 4. **User cancels wizard (ESC/close):** All zenity dialogs and nwg-displays return non-zero on cancel. The wizard exits cleanly, leaving the current config untouched.
 
-5. **Single monitor (no external):** If only one monitor is detected and a config exists, apply it. If not, generate a trivial config (just `monitor=desc:...,preferred,auto,SCALE`). No wizard needed.
+5. **Single monitor (no external):** If only one monitor is detected and a config exists, apply it. If not, generate a trivial config (just `hl.monitor({ output = "desc:...", mode = "preferred", position = "auto", scale = SCALE })`). No wizard needed.
 
 6. **nwg-displays closed without saving:** Check if temp output files exist after nwg-displays exits. If not, abort with notification.
 
-7. **Socket disconnection:** When Hyprland exits, the socket closes, `ncat` terminates, the read loop ends, and the daemon exits naturally. No restart logic needed — the next Hyprland session will re-run `exec-once`.
+7. **Socket disconnection:** When Hyprland exits, the socket closes, `ncat` terminates, the read loop ends, and the daemon exits naturally. No restart logic needed — the next Hyprland session will re-run `hl.exec_once`.
 
 ## Integration with Hyprland
 
-The daemon is started via Hyprland's `exec-once` directive. The user adds this to their `hyprland.conf`:
+The daemon is started via Hyprland's `exec_once` function. The user adds this to their `hyprland.lua`:
 
-```
-exec-once = hyprmonitormanager daemon
+```lua
+hl.exec_once({ cmd = "hyprmonitormanager daemon" })
 ```
 
 **Lifecycle:**
-- Hyprland starts → `exec-once` launches the daemon
+- Hyprland starts → `hl.exec_once` launches the daemon
 - Daemon runs `apply` immediately (handles monitors already connected at login)
 - Daemon listens for hotplug events via socket2
 - Hyprland exits → socket closes → `ncat` exits → read loop ends → daemon exits
